@@ -1,0 +1,68 @@
+name: OEM GSI Porter
+
+on:
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Setup ErfanGSIs Tools
+        run: |
+          sudo apt install p7zip-full p7zip-rar
+          wget https://cyfuture.dl.sourceforge.net/project/origin-gsi-tool/2.2.0-sand/ogsitool-release-v2.2.0sand.7z?viasf=1
+          7z x ./ogsitool-release-v2.2.0sand.7z
+          ls
+      - name: Build A/B
+        if: ${{ steps.config.outputs.output_type == 'all' }}
+        run: |
+          sudo ./ErfanGSIs/url2GSI.sh "${{ steps.config.outputs.url }}" "${{ steps.config.outputs.firmware_type }}" "${{ steps.config.outputs.extra_args }}"
+      - name: Build AB
+        if: ${{ steps.config.outputs.output_type == 'ab' }}
+        run: |
+          sudo ./ErfanGSIs/url2GSI.sh "${{ steps.config.outputs.url }}" "${{ steps.config.outputs.firmware_type }}" --ab ${{ steps.config.outputs.extra_args }}
+      - name: Build AOnly
+        if: ${{ steps.config.outputs.output_type == 'a' }}
+        run: |
+          sudo ./ErfanGSIs/url2GSI.sh "${{ steps.config.outputs.url }}" "${{ steps.config.outputs.firmware_type }}" --aonly ${{ steps.config.outputs.extra_args }}
+      - name: Pre-Upload
+        run: |
+          mkdir build/
+          sudo mv ErfanGSIs/output/*.img build/
+          gzip -r build/
+          sudo mv ErfanGSIs/output/*.txt build/
+      - name: Setup SSH
+        uses: fastai/workflows/ssh@master
+        with:
+          ssh_key: ${{ secrets.SSH_KEY }}
+          key_file: id_ecdsa
+      - name: Upload
+        run: |
+          ssh-keyscan frs.sourceforge.net >> ~/.ssh/known_hosts
+          sshpass -p "${{ secrets.PASSWORD }}" rsync -arsP -e ssh build/ "${{ secrets.USERNAME }}@frs.sourceforge.net:${{ steps.config.outputs.sourceforge_dir }}"
+      - name: Telegram Notify
+        if: ${{ steps.config.outputs.tg_chat_ids != 0 }}
+        run: |
+          BOT_TOKEN="${{ secrets.TG_BOT_TOKEN }}"
+          CHAT_IDS="${{ steps.config.outputs.tg_chat_ids }}"
+          TG_URL="https://api.telegram.org/bot$BOT_TOKEN/sendMessage"
+
+          chatids=("$CHAT_IDS")
+
+          for chat in "${chatids[@]}"; do
+            TYPE="${{ steps.config.outputs.firmware_type }}"
+            OUTPUT="${{ steps.config.outputs.output_type }}"
+            BASE="${{ steps.config.outputs.url }}"
+            SOURCEFORGE="${{ steps.config.outputs.sourceforge_url }}"
+            for file in build/*.txt; do
+              filename=$(basename -- "$file")
+              sed -i "1s/^/Name: ${filename%.*}\n/" "$file"
+              printf "\n\nBase Firmware Link: $BASE" >> "$file"
+              printf "\n\nDownload Link: $SOURCEFORGE" >> "$file"
+              curl -s -d "chat_id=$chat"  --data-urlencode text@$file "$TG_URL"
+            done
+          done
